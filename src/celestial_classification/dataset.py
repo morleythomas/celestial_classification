@@ -36,15 +36,21 @@ class Dataset:
         self.setTrainTestSet(random_seed, test_size)
 
     @staticmethod
-    def loadFromValPreds(
-        preds_location: str
+    def loadFromPredsFile(
+        preds_location: str,
+        test: bool = False
     ):
         
         dataset = Dataset()
-        dataset.training_dataset_preds = pd.read_csv(preds_location)
 
-        if dataset.x_train.shape[0] != dataset.training_dataset_preds.shape[0]:
-            raise Exception("training data and predictions data do not match")
+        if test:
+            dataset.test_dataset_preds = pd.read_csv(preds_location)
+            if dataset.x_test.shape[0] != dataset.test_dataset_preds.shape[0]:
+                raise Exception("test data and predictions data do not match")
+        else:
+            dataset.training_dataset_preds = pd.read_csv(preds_location)
+            if dataset.x_train.shape[0] != dataset.training_dataset_preds.shape[0]:
+                raise Exception("training data and predictions data do not match")
         
         return dataset
     
@@ -65,9 +71,9 @@ class Dataset:
         training_dataset['class'] = y_train['class']
         training_dataset = training_dataset.reset_index(drop=True)
 
-        testing_dataset = x_test.copy()
-        testing_dataset['class'] = y_test['class']
-        testing_dataset = testing_dataset.reset_index(drop=True)
+        test_dataset = x_test.copy()
+        test_dataset['class'] = y_test['class']
+        test_dataset = test_dataset.reset_index(drop=True)
 
         x_train = x_train.to_numpy()
         x_test = x_test.to_numpy()
@@ -86,70 +92,90 @@ class Dataset:
         x_test = scaler.transform(x_test)
 
         self.training_dataset = training_dataset
-        self.testing_dataset = testing_dataset
+        self.test_dataset = test_dataset
         self.x_train = x_train
         self.y_train = y_train
         self.x_test = x_test
         self.y_test = y_test
 
-    def getValidationPreds(
+    def getPreds(
         self,
         models_list: list = config.training.model_list,
-        k_folds: int = config.training.kfold_parameters["n_splits"]
+        test: bool = False
     ):
-        training_dataset_preds = self.training_dataset.copy()
+        if test:
+            df = self.test_dataset.copy()
+        else:
+            df = self.training_datset.copy()
         
-        classes = training_dataset_preds['class'].value_counts().index
+        classes = df['class'].value_counts().index
         class_mapping = {cls: i for i, cls in enumerate(classes)}
-        training_dataset_preds['class_binary'] = training_dataset_preds['class'].apply(
+        df['class_binary'] = df['class'].apply(
             lambda x: [1 if i == class_mapping[x] else 0 for i in range(len(class_mapping.keys()))]
             )
 
         for model_name in models_list:
-            model = models.Model(model_name, self.x_train, self.y_train, self.x_test, self.y_test, k_folds)
+            if test:
+                model = models.Model(model_name, self.x_train, self.y_train)
+            else:
+                model = models.Model(model_name, self.x_test, self.y_test)
             predictions = model.getTrainPreds()
 
-            training_dataset_preds[f"{model_name}_preds"] = pd.Series(predictions)
-
-        self.training_dataset_preds = training_dataset_preds
+        if test:
+            self.test_dataset_preds = df[f"{model_name}_preds"] = pd.Series(predictions)
+        else:
+            self.training_dataset_preds = df[f"{model_name}_preds"] = pd.Series(predictions)
 
     def printClassificationReport(
         self,
-        model: str
+        model: str,
+        test: bool = False
     ):
-        y_true = self.training_dataset_preds['class']
+        if test:
+            df = self.training_dataset_preds.copy()
+        else:
+            df = self.training_dataset_preds.copy()
+
+        y_true = df['class']
     
         # Extract predicted probabilities and convert to class labels
-        y_score = self.training_dataset_preds[f"{model}_preds"]
+        y_score = df[f"{model}_preds"]
         if isinstance(y_score.iloc[0], str):
             y_score = y_score.apply(ast.literal_eval)
         y_score = np.vstack(y_score.values).astype(float)
         y_pred = y_score.argmax(axis=1)
 
         # Map prediction indices back to class labels
-        class_order = self.training_dataset_preds['class'].value_counts().index.tolist()
+        class_order = df['class'].value_counts().index.tolist()
         y_pred_labels = [class_order[i] for i in y_pred]
 
         # Print classification report
         print(f"\nClassification Report for {model}:\n")
         print(classification_report(y_true, y_pred_labels, target_names=class_order))
 
-    def showValROCCurves(
+    def showROCCurves(
         self,
-        grid_cols: int = config.plots.rocauc_grid_cols
-    ):
-        class_order = self.training_dataset_preds['class'].value_counts().index
+        grid_cols: int = config.plots.rocauc_grid_cols,
+        test: bool = False
+    ): 
+
+        if test:
+            df = self.test_dataset_preds.copy()
+        else:
+            df = self.training_dataset_preds.copy()
+
+        class_order = df['class'].value_counts().index
 
         n_classes = len(class_order)
 
-        y_true = self.training_dataset_preds['class_binary']
+        y_true = df['class_binary']
         if isinstance(y_true.iloc[0], str):  # If stored as string
             y_true = y_true.apply(ast.literal_eval)
         y_true = np.vstack(y_true.values).astype(int)
         y_true = np.array(y_true)
 
         # Identify classifier names by extracting unique prefixes before '_preds'
-        pred_cols = [col for col in self.training_dataset_preds.columns if col.endswith("_preds")]
+        pred_cols = [col for col in df.columns if col.endswith("_preds")]
         classifiers = list(set(col.replace("_preds", '') for col in pred_cols))
 
         n_classifiers = len(classifiers)
@@ -162,7 +188,7 @@ class Dataset:
         for i, clf in enumerate(classifiers):
             ax = axs[i]
             
-            y_score_raw = self.training_dataset_preds[f"{clf}_preds"]
+            y_score_raw = df[f"{clf}_preds"]
             if isinstance(y_score_raw.iloc[0], str):
                 y_score_parsed = y_score_raw.apply(ast.literal_eval)
             else:
@@ -191,18 +217,24 @@ class Dataset:
 
     def plotConfusionMatrix(
             self,
-            model_name: str
+            model_name: str,
+            test: bool = False
     ):
+        
+        if test:
+            df = self.test_dataset_preds.copy()
+        else:
+            df = self.training_dataset_preds.copy()
         
         classes = self.training_dataset_preds['class'].value_counts().index
 
-        y_true = self.training_dataset_preds['class_binary'].apply(ast.literal_eval)
+        y_true = df['class_binary'].apply(ast.literal_eval)
         y_true = y_true.apply(lambda x: np.argmax(x)).values
 
-        if f"{model_name}_preds" not in self.training_dataset_preds.columns:
+        if f"{model_name}_preds" not in df.columns:
             raise ValueError(f"Model '{model_name}' not found")
 
-        y_pred = self.training_dataset_preds[f"{model_name}_preds"].apply(ast.literal_eval)
+        y_pred = df[f"{model_name}_preds"].apply(ast.literal_eval)
         y_pred = y_pred.apply(lambda x: np.argmax(x)).values
 
         # Compute confusion matrix

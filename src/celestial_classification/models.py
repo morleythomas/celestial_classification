@@ -25,11 +25,8 @@ class Model():
     def __init__(
         self,
         model_name: str,
-        x_train,
-        y_train,
-        x_test,
-        y_test,
-        kf
+        x,
+        y
     ):
 
         model_dict = {
@@ -46,17 +43,15 @@ class Model():
 
         self.kfold = KFold(**config.training.kfold_parameters)
 
-        self.x_train = x_train
-        self.y_train = y_train
-        self.x_test = x_test
-        self.y_test = y_test
+        self.x = x
+        self.y = y
 
         model = model_dict[model_name]
 
         if model_name == "mlp":
             self.model = model(
-                input_size = self.x_train.shape[1],
-                output_size = np.unique(self.y_train).shape[0],
+                input_size = self.x.shape[1],
+                output_size = np.unique(self.y).shape[0],
                 kf = self.kfold,
                 **config.training.hyperparameters[model_name]
             )
@@ -68,12 +63,12 @@ class Model():
         
         if self.model_name == "mlp":
             predictions = self.model.cross_val_predict(
-                torch.tensor(self.x_train, dtype=torch.float32), 
-                torch.tensor(self.y_train, dtype=torch.long)
+                torch.tensor(self.x, dtype=torch.float32), 
+                torch.tensor(self.y, dtype=torch.long)
             ).cpu().tolist()
 
         else:
-            predictions = cross_val_predict(self.model, self.x_train, self.y_train, cv=self.kfold, method="predict_proba").tolist()
+            predictions = cross_val_predict(self.model, self.x, self.y, cv=self.kfold, method="predict_proba").tolist()
 
         return predictions
     
