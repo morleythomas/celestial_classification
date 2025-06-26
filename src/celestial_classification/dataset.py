@@ -6,7 +6,13 @@ import numpy as np
 
 import matplotlib.pyplot as plt
 
-from sklearn.metrics import roc_curve, auc, classification_report
+from sklearn.metrics import (
+    roc_curve, 
+    auc, 
+    classification_report, 
+    confusion_matrix,
+    ConfusionMatrixDisplay
+    )
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
@@ -91,7 +97,6 @@ class Dataset:
         models_list: list = config.training.model_list,
         k_folds: int = config.training.kfold_parameters["n_splits"]
     ):
-
         training_dataset_preds = self.training_dataset.copy()
         
         classes = training_dataset_preds['class'].value_counts().index
@@ -184,3 +189,23 @@ class Dataset:
         plt.show()
 
 
+    def plotConfusionMatrix(
+            self,
+            model_name: str
+    ):
+        
+        classes = self.training_dataset_preds['class'].value_counts().index
+
+        y_true = self.training_dataset_preds['class_binary'].apply(ast.literal_eval)
+        y_true = y_true.apply(lambda x: np.argmax(x)).values
+
+        if f"{model_name}_preds" not in self.training_dataset_preds.columns:
+            raise ValueError(f"Model '{model_name}' not found")
+
+        y_pred = self.training_dataset_preds[f"{model_name}_preds"].apply(ast.literal_eval)
+        y_pred = y_pred.apply(lambda x: np.argmax(x)).values
+
+        # Compute confusion matrix
+        cm = confusion_matrix(y_true, y_pred)
+        disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=classes)
+        disp.plot()
