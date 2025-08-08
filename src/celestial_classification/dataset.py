@@ -7,33 +7,40 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from sklearn.metrics import (
-    roc_curve, 
-    auc, 
-    classification_report, 
+    roc_curve,
+    auc,
+    classification_report,
     confusion_matrix,
     ConfusionMatrixDisplay
     )
+
+from imblearn.over_sampling import SMOTE
+from collections import Counter
+
 from sklearn.model_selection import train_test_split
+from sklearn.neighbors import LocalOutlierFactor
 from sklearn.preprocessing import StandardScaler
+from sklearn.utils import shuffle
 
 from celestial_classification import models
 from celestial_classification import config
 
 
 class Dataset:
-    
+
     def __init__(
         self,
         cols: list = config.dataset.extract_cols,
         location: str = config.dataset.dir,
         test_size: float = config.dataset.test_size,
-        random_seed: int = config.random_seed
+        random_seed: int = config.random_seed,
+        augmentation: bool = False
     ):
 
         self.dataset = pd.read_csv(location)
         self.dataset = self.dataset[cols]
 
-        self.setTrainTestSet(random_seed, test_size)
+        self.setTrainTestSet(random_seed, test_size, augmentation)
 
     @staticmethod
     def loadFromPredsFile(
@@ -57,40 +64,61 @@ class Dataset:
     def setTrainTestSet(
         self,
         random_seed,
-        test_size
+        test_size,
+        augmentation
     ):
+        cols = self.dataset.columns
+        class_order = self.dataset["class"].value_counts().index.tolist()
 
         x_train, x_test, y_train, y_test = train_test_split(
-            self.dataset.drop(columns=['class']), 
+            self.dataset.drop(columns=['class']),
             self.dataset[['class']], 
             test_size=test_size,
             random_state=random_seed
         )
 
-        training_dataset = x_train.copy()
-        training_dataset['class'] = y_train['class']
-        training_dataset = training_dataset.reset_index(drop=True)
-
-        test_dataset = x_test.copy()
-        test_dataset['class'] = y_test['class']
-        test_dataset = test_dataset.reset_index(drop=True)
+        y_train = y_train['class'].apply(lambda x: class_order.index(x)).to_numpy()
+        y_test = y_test['class'].apply(lambda x: class_order.index(x)).to_numpy()
 
         x_train = x_train.to_numpy()
         x_test = x_test.to_numpy()
 
-        y_train = y_train['class'].apply(
-            lambda x: 0 if x == "GALAXY" else 1 if x == "STAR" else 2
-        ).to_numpy()
+        if augmentation:
+            dataset = pd.DataFrame(np.column_stack((x_train, y_train)), columns = cols)
 
-        y_test = y_test['class'].apply(
-            lambda x: 0 if x == "GALAXY" else 1 if x == "STAR" else 2
-        ).to_numpy()
+            if True:
+                # TODO: add option to skip/include outlier filter
+                clf = LocalOutlierFactor()
+                _ = clf.fit_predict(dataset)
+
+                x_score = clf.negative_outlier_factor_
+                outlier_score = pd.DataFrame()
+                outlier_score["score"] = x_score
+
+                threshold = -1.5                                            
+                filter = outlier_score["score"] < threshold
+                outlier_index = outlier_score[filter].index.tolist()
+
+                dataset.drop(outlier_index, inplace=True)
+
+                x_train = dataset.drop(['class'], axis = 1)
+                y_train = dataset.loc[:,'class'].values
+
+            sm = SMOTE(random_state=random_seed)
+            print('Original dataset shape %s' % Counter(y_train))
+            x_train, y_train = sm.fit_resample(x_train, y_train)
+            x_train, y_train = shuffle(x_train, y_train, random_state=random_seed)
+            print('Resampled dataset shape %s' % Counter(y_train))
 
         scaler = StandardScaler().fit(x_train)
 
         x_train = scaler.transform(x_train)
         x_test = scaler.transform(x_test)
 
+        training_dataset = pd.DataFrame(np.column_stack((x_train, y_train)), columns = cols)
+        test_dataset = pd.DataFrame(np.column_stack((x_test, y_test)), columns = cols)
+
+        self.class_order = class_order
         self.training_dataset = training_dataset
         self.test_dataset = test_dataset
         self.x_train = x_train
@@ -106,9 +134,10 @@ class Dataset:
         if test:
             df = self.test_dataset.copy()
         else:
-            df = self.training_datset.copy()
+            df = self.training_dataset.copy()
         
-        classes = df['class'].value_counts().index
+        classes = range(0, len(self.class_order))
+
         class_mapping = {cls: i for i, cls in enumerate(classes)}
         df['class_binary'] = df['class'].apply(
             lambda x: [1 if i == class_mapping[x] else 0 for i in range(len(class_mapping.keys()))]
@@ -116,15 +145,18 @@ class Dataset:
 
         for model_name in models_list:
             if test:
-                model = models.Model(model_name, self.x_train, self.y_train)
-            else:
                 model = models.Model(model_name, self.x_test, self.y_test)
-            predictions = model.getTrainPreds()
+                # TODO: get test preds
+            else:
+                model = models.Model(model_name, self.x_train, self.y_train)
+                predictions = model.getTrainPreds()
+
+            df[f"{model_name}_preds"] = predictions
 
         if test:
-            self.test_dataset_preds = df[f"{model_name}_preds"] = pd.Series(predictions)
+            self.test_dataset_preds = df
         else:
-            self.training_dataset_preds = df[f"{model_name}_preds"] = pd.Series(predictions)
+            self.training_dataset_preds = df
 
     def printClassificationReport(
         self,
@@ -132,26 +164,29 @@ class Dataset:
         test: bool = False
     ):
         if test:
-            df = self.training_dataset_preds.copy()
+            df = self.test_dataset_preds.copy()
         else:
             df = self.training_dataset_preds.copy()
 
-        y_true = df['class']
+        class_order = self.class_order
+
+        y_true = df['class_binary']
+        if isinstance(y_true.iloc[0], str):
+            y_true = y_true.apply(ast.literal_eval)
+        y_true = np.vstack(y_true.values).astype(int)
+        y_true = y_true.argmax(axis=1)
     
-        # Extract predicted probabilities and convert to class labels
         y_score = df[f"{model}_preds"]
         if isinstance(y_score.iloc[0], str):
             y_score = y_score.apply(ast.literal_eval)
         y_score = np.vstack(y_score.values).astype(float)
         y_pred = y_score.argmax(axis=1)
 
-        # Map prediction indices back to class labels
-        class_order = df['class'].value_counts().index.tolist()
         y_pred_labels = [class_order[i] for i in y_pred]
 
-        # Print classification report
+
         print(f"\nClassification Report for {model}:\n")
-        print(classification_report(y_true, y_pred_labels, target_names=class_order))
+        print(classification_report(y_true, y_pred, target_names=class_order))
 
     def showROCCurves(
         self,
@@ -164,17 +199,16 @@ class Dataset:
         else:
             df = self.training_dataset_preds.copy()
 
-        class_order = df['class'].value_counts().index
+        class_order = self.class_order
 
         n_classes = len(class_order)
 
         y_true = df['class_binary']
-        if isinstance(y_true.iloc[0], str):  # If stored as string
+        if isinstance(y_true.iloc[0], str):
             y_true = y_true.apply(ast.literal_eval)
         y_true = np.vstack(y_true.values).astype(int)
         y_true = np.array(y_true)
 
-        # Identify classifier names by extracting unique prefixes before '_preds'
         pred_cols = [col for col in df.columns if col.endswith("_preds")]
         classifiers = list(set(col.replace("_preds", '') for col in pred_cols))
 
@@ -207,7 +241,6 @@ class Dataset:
             ax.legend(loc='lower right')
             ax.grid(True)
 
-        # Remove any extra subplots
         for j in range(i+1, len(axs)):
             fig.delaxes(axs[j])
 
@@ -226,18 +259,22 @@ class Dataset:
         else:
             df = self.training_dataset_preds.copy()
         
-        classes = self.training_dataset_preds['class'].value_counts().index
+        classes = self.class_order
+        
+        y_true = df['class_binary']
+        if isinstance(y_true.iloc[0], str):
+            y_true = y_true.apply(ast.literal_eval)
 
-        y_true = df['class_binary'].apply(ast.literal_eval)
-        y_true = y_true.apply(lambda x: np.argmax(x)).values
+        y_true = y_true.apply(lambda x: np.argmax(x)).apply(lambda x: classes[x]).values
 
         if f"{model_name}_preds" not in df.columns:
             raise ValueError(f"Model '{model_name}' not found")
 
-        y_pred = df[f"{model_name}_preds"].apply(ast.literal_eval)
-        y_pred = y_pred.apply(lambda x: np.argmax(x)).values
+        y_pred = df[f"{model_name}_preds"]
+        if isinstance(y_pred.iloc[0], str):
+            y_pred = y_pred.apply(ast.literal_eval)
+        y_pred = y_pred.apply(lambda x: np.argmax(x)).apply(lambda x: classes[x]).values
 
-        # Compute confusion matrix
         cm = confusion_matrix(y_true, y_pred)
         disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=classes)
         disp.plot()
